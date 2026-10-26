@@ -1,0 +1,97 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+connectors:
+  spanmetrics:
+    histogram:
+      explicit:
+        buckets: [0.005s, 0.01s, 0.025s, 0.05s, 0.1s, 0.25s, 0.5s, 1s, 2s, 5s]
+      unit: s
+    # Captures dynamic attributes from your traces. status.code and service.name are defaults and omitted here.
+    dimensions:
+      - name: http.request.method
+      - name: http.route
+      - name: http.response.status_code
+    dimensions_cache_size: 10000
+
+processors:
+  batch:
+    send_batch_size: 100
+    timeout: 1s
+
+  # Standard OTel Metric Transformation for New Relic APM Summary Page
+  metricstransform:
+    transforms:
+      - include: traces.span.metrics.duration
+        match_type: strict
+        action: insert
+        new_name: http.server.request.duration
+
+      - include: traces.span.metrics.duration
+        match_type: strict
+        action: insert
+        new_name: apm.service.transaction.duration
+
+      - include: traces.span.metrics.calls
+        match_type: strict
+        action: insert
+        new_name: apm.service.transaction.count
+
+  # DYNAMIC OTTL RULES: Scales dynamically to any number of routes
+  transform:
+    metric_statements:
+      - context: datapoint
+        statements:
+          # 1. Dynamically construct transactionName for ANY route: "WebTransaction/server/{METHOD} {ROUTE}"
+          - set(attributes["transactionName"], Concat(["WebTransaction/server/", attributes["http.request.method"], " ", attributes["http.route"]], "")) 
+              where attributes["http.route"] != nil and attributes["http.request.method"] != nil
+
+          # 2. Universal Web categorization for APM UI
+          - set(attributes["transactionType"], "Web")
+
+          # 3. Dynamic error tagging: Any HTTP 4xx/5xx status is automatically classified as an error count
+          - set(metric.name, "apm.service.error.count") 
+              where metric.name == "apm.service.transaction.count" and (attributes["http.response.status_code"] >= 400 or attributes["status.code"] == "STATUS_CODE_ERROR")
+
+  cumulativetodelta:
+    include:
+      match_type: strict
+      metrics:
+        - http.server.request.duration
+        - apm.service.transaction.duration
+        - apm.service.transaction.count
+        - apm.service.error.count
+        - traces.span.metrics.duration
+        - traces.span.metrics.calls
+
+exporters:
+  otlp/newrelic:
+    endpoint: "otlp.nr-data.net:4317"
+    headers:
+      api-key: ${env:NEW_RELIC_LICENSE_KEY}
+
+  debug:
+    verbosity: normal
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [spanmetrics, otlp/newrelic, debug]
+
+    metrics:
+      receivers: [spanmetrics]
+      processors: [metricstransform, transform, cumulativetodelta, batch]
+      exporters: [otlp/newrelic, debug]
+
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/newrelic, debug]
+

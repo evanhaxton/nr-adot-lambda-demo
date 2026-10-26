@@ -1,0 +1,40 @@
+services:
+  adot-collector:
+    # Switch from aws-otel-collector to opentelemetry-collector-contrib
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: adot-collector
+    restart: unless-stopped
+    command: ["--config=/etc/adot/collector-config.yaml"]
+    environment:
+      - NEW_RELIC_LICENSE_KEY=${NEW_RELIC_LICENSE_KEY}
+    volumes:
+      - ./collector-config.yaml:/etc/adot/collector-config.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+    networks:
+      - telemetry-net
+
+  lambda-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lambda-app
+    restart: unless-stopped
+    depends_on:
+      - adot-collector
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://adot-collector:4318
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://adot-collector:4318/v1/traces
+      - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://adot-collector:4318/v1/metrics
+      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://adot-collector:4318/v1/logs
+      - OTEL_SERVICE_NAME=order-service-lambda
+      - AWS_LAMBDA_FUNCTION_NAME=order-service-lambda
+    ports:
+      - "9000:8080" # Maps local port 9000 to Lambda RIE on 8080
+    networks:
+      - telemetry-net
+
+networks:
+  telemetry-net:
+    driver: bridge
